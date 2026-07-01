@@ -1,0 +1,6 @@
+{
+  "name": "English Word Typing Game Spec",
+  "description": "英単語タイピングゲームの仕様書作成プロジェクト",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
