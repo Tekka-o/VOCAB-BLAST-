@@ -10,6 +10,16 @@ interface WordData {
   level: 'elementary' | 'junior' | 'high' | 'daily';
 }
 
+// 苦手単語データのインターフェース
+interface ReviewWord {
+  wordId: string;
+  japanese: string;
+  english: string;
+  level: string;
+  missCount: number;
+  hintCount: number;
+}
+
 // 収録英単語リスト (小学生〜高校生・日常会話レベルの代表的な54単語)
 const WORD_LIST: WordData[] = [
   // --- 7文字以下 (little) ---
@@ -82,7 +92,7 @@ const WORD_LIST: WordData[] = [
 
 export default function App() {
   // ゲームステート
-  const [gameStatus, setGameStatus] = useState<'title' | 'playing' | 'result'>('title');
+  const [gameStatus, setGameStatus] = useState<'title' | 'playing' | 'result' | 'review'>('title');
   const [mode, setMode] = useState<'little' | 'long' | 'remix'>('little');
   const [score, setScore] = useState<number>(0);
   const [timeLeft, setTimeLeft] = useState<number>(30.0);
@@ -92,11 +102,20 @@ export default function App() {
   const [currentWord, setCurrentWord] = useState<WordData | null>(null);
   const [typedText, setTypedText] = useState<string>('');
   const [isCurrentWordClean, setIsCurrentWordClean] = useState<boolean>(true);
+  const [hintIndex, setHintIndex] = useState<number>(-1); // スペースキーによるヒント表示の文字インデックス
+  
+  // 振り返り（苦手克服）モード関連
+  const [reviewList, setReviewList] = useState<ReviewWord[]>([]);
+  const [reviewMode, setReviewMode] = useState<'idle' | 'single' | 'all'>('idle');
+  const [reviewQueue, setReviewQueue] = useState<WordData[]>([]);
+  const [reviewQueueIndex, setReviewQueueIndex] = useState<number>(0);
+  const [isReviewWordClean, setIsReviewWordClean] = useState<boolean>(true);
   
   // エフェクト・演出用
   const [comboEffect, setComboEffect] = useState<{ combo: number; bonus: number } | null>(null);
   const [shakeTrigger, setShakeTrigger] = useState<boolean>(false);
   const [isCorrectFlash, setIsCorrectFlash] = useState<boolean>(false);
+  const [isMissFlash, setIsMissFlash] = useState<boolean>(false);
   const [lastTimeAdded, setLastTimeAdded] = useState<number | null>(null);
 
   // ランキング (TOP 10 スコアの配列)
@@ -230,6 +249,7 @@ export default function App() {
     setCurrentWord(chosen);
     setTypedText('');
     setIsCurrentWordClean(true);
+    setHintIndex(-1);
   };
 
   // ゲームスタート
@@ -243,12 +263,88 @@ export default function App() {
     nextQuestion(mode);
   };
 
+  // 個別練習の開始
+  const startSingleReview = (wordId: string) => {
+    const target = WORD_LIST.find(w => w.id === wordId);
+    if (!target) return;
+    setReviewMode('single');
+    setReviewQueue([target]);
+    setReviewQueueIndex(0);
+    setCurrentWord(target);
+    setTypedText('');
+    setIsReviewWordClean(true);
+    setHintIndex(-1);
+  };
+
+  // 一括練習の開始
+  const startAllReview = () => {
+    if (reviewList.length === 0) return;
+    const targets = reviewList
+      .map(item => WORD_LIST.find(w => w.id === item.wordId))
+      .filter((w): w is WordData => !!w);
+    if (targets.length === 0) return;
+
+    const shuffled = [...targets].sort(() => Math.random() - 0.5);
+    setReviewMode('all');
+    setReviewQueue(shuffled);
+    setReviewQueueIndex(0);
+    setCurrentWord(shuffled[0]);
+    setTypedText('');
+    setIsReviewWordClean(true);
+    setHintIndex(-1);
+  };
+
+  // 練習を中断する
+  const stopReview = () => {
+    setReviewMode('idle');
+    setReviewQueue([]);
+    setCurrentWord(null);
+    setTypedText('');
+  };
+
   // キー入力イベントハンドラ
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (gameStatus !== 'playing' || !currentWord) return;
+      // プレイ中、または振り返りモードの練習中以外は無視
+      const isReviewPlaying = gameStatus === 'review' && reviewMode !== 'idle';
+      if ((gameStatus !== 'playing' && !isReviewPlaying) || !currentWord) return;
 
       const key = e.key;
+
+      // スペースキーが押された場合はヒントを表示（コンボ数はリセットされるペナルティあり、赤色の警告演出は行わない）
+      if (key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        if (typedText.length < currentWord.english.length) {
+          if (gameStatus === 'playing') {
+            setIsCurrentWordClean(false);
+            setCombo(0); // コンボリセット
+            setComboEffect(null);
+            
+            // 振り返り用ヒント使用の記録
+            setReviewList(prev => {
+              const existing = prev.find(item => item.wordId === currentWord.id);
+              if (existing) {
+                return prev.map(item => item.wordId === currentWord.id ? { ...item, hintCount: item.hintCount + 1 } : item);
+              } else {
+                return [...prev, {
+                  wordId: currentWord.id,
+                  japanese: currentWord.japanese,
+                  english: currentWord.english,
+                  level: currentWord.level,
+                  missCount: 0,
+                  hintCount: 1
+                }];
+              }
+            });
+          } else if (gameStatus === 'review') {
+            setIsReviewWordClean(false); // 練習中にヒントを使ったら、ノーミスクリア（克服）の対象外とする
+          }
+          
+          playSound('tick'); // 穏やかなコッという音
+          setHintIndex(typedText.length); // 現在の入力待ち位置にヒントをセット
+        }
+        return;
+      }
 
       // アルファベット1文字のみ受け付ける (大文字・小文字は区別しない)
       if (key.length === 1 && /[a-zA-Z]/.test(key)) {
@@ -259,8 +355,12 @@ export default function App() {
           // 正解！
           const nextTypedText = typedText + inputChar;
           setTypedText(nextTypedText);
-          setScore(prev => prev + 100); // 1文字打つたびに100点増える
+          
+          if (gameStatus === 'playing') {
+            setScore(prev => prev + 100); // 1文字打つたびに100点増える
+          }
           playSound('correct');
+          setHintIndex(-1); // 文字が進んだのでヒントをリセット
 
           // 単語が完成したかチェック
           if (nextTypedText.length === currentWord.english.length) {
@@ -269,43 +369,104 @@ export default function App() {
             setIsCorrectFlash(true);
             setTimeout(() => setIsCorrectFlash(false), 200);
 
-            // 制限時間増加量の決定
-            const isLong = currentWord.english.length >= 8;
-            const addedSec = isLong ? 2 : 1;
-            setTimeLeft(prev => Math.min(99.9, prev + addedSec)); // 最大表示99.9秒に制限
-            setLastTimeAdded(addedSec);
-            setTimeout(() => setLastTimeAdded(null), 800);
+            if (gameStatus === 'playing') {
+              // 制限時間増加量の決定
+              const isLong = currentWord.english.length >= 8;
+              const addedSec = isLong ? 2 : 1;
+              setTimeLeft(prev => Math.min(99.9, prev + addedSec)); // 最大表示99.9秒に制限
+              setLastTimeAdded(addedSec);
+              setTimeout(() => setLastTimeAdded(null), 800);
 
-            // コンボ判定
-            if (isCurrentWordClean) {
-              const nextCombo = combo + 1;
-              setCombo(nextCombo);
-              const comboBonus = nextCombo * 1000;
-              setScore(prev => prev + comboBonus); // コンボが増えたときに連続正解数×1000点加算
+              // コンボ判定
+              if (isCurrentWordClean) {
+                const nextCombo = combo + 1;
+                setCombo(nextCombo);
+                const comboBonus = nextCombo * 1000;
+                setScore(prev => prev + comboBonus); // コンボが増えたときに連続正解数×1000点加算
 
-              // コンボエフェクト起動
-              setComboEffect({ combo: nextCombo, bonus: comboBonus });
+                // コンボエフェクト起動
+                setComboEffect({ combo: nextCombo, bonus: comboBonus });
+
+                // 本番中にノーミスクリアした場合は、苦手リストから自動削除（完全克服機能）
+                setReviewList(prev => prev.filter(item => item.wordId !== currentWord.id));
+              }
+
+              // 次の問題へ
+              setTimeout(() => {
+                nextQuestion(mode);
+              }, 100);
+            } else if (gameStatus === 'review') {
+              // 復習（振り返り）中の克服判定
+              if (isReviewWordClean) {
+                // ノーミスかつノーヒントでクリアした場合、カウントをそれぞれ1ずつ減らす（0になったら自動削除）
+                setReviewList(prev => {
+                  return prev.map(item => {
+                    if (item.wordId === currentWord.id) {
+                      const nextMiss = Math.max(0, item.missCount - 1);
+                      const nextHint = Math.max(0, item.hintCount - 1);
+                      return { ...item, missCount: nextMiss, hintCount: nextHint };
+                    }
+                    return item;
+                  }).filter(item => item.missCount > 0 || item.hintCount > 0);
+                });
+              }
+
+              // 次の苦手単語練習へ
+              setTimeout(() => {
+                const nextIndex = reviewQueueIndex + 1;
+                if (nextIndex < reviewQueue.length) {
+                  setReviewQueueIndex(nextIndex);
+                  setCurrentWord(reviewQueue[nextIndex]);
+                  setTypedText('');
+                  setIsReviewWordClean(true);
+                  setHintIndex(-1);
+                } else {
+                  // 復習終了（完了）
+                  setReviewMode('idle');
+                  setReviewQueue([]);
+                  setCurrentWord(null);
+                  setTypedText('');
+                }
+              }, 300);
             }
-
-            // 次の問題へ
-            setTimeout(() => {
-              nextQuestion(mode);
-            }, 100);
           }
         } else {
           // 不正解・ミスタイプ
-          setIsCurrentWordClean(false);
-          setCombo(0); // コンボリセット
-          setComboEffect(null);
+          if (gameStatus === 'playing') {
+            setIsCurrentWordClean(false);
+            setCombo(0); // コンボリセット
+            setComboEffect(null);
+
+            // 振り返り用ミスタイプの記録
+            setReviewList(prev => {
+              const existing = prev.find(item => item.wordId === currentWord.id);
+              if (existing) {
+                return prev.map(item => item.wordId === currentWord.id ? { ...item, missCount: item.missCount + 1 } : item);
+              } else {
+                return [...prev, {
+                  wordId: currentWord.id,
+                  japanese: currentWord.japanese,
+                  english: currentWord.english,
+                  level: currentWord.level,
+                  missCount: 1,
+                  hintCount: 0
+                }];
+              }
+            });
+          } else if (gameStatus === 'review') {
+            setIsReviewWordClean(false); // ミスタイプしたためノーミス克服の対象外にする
+          }
+
           playSound('miss');
-          setShakeTrigger(prev => !prev); // カードを揺らすトリガー
+          setIsMissFlash(true);
+          setTimeout(() => setIsMissFlash(false), 200);
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [gameStatus, currentWord, typedText, combo, isCurrentWordClean, mode]);
+  }, [gameStatus, currentWord, typedText, combo, isCurrentWordClean, mode, hintIndex, reviewMode, reviewQueue, reviewQueueIndex, isReviewWordClean]);
 
   // コンボエフェクト自動消滅
   useEffect(() => {
@@ -387,7 +548,7 @@ export default function App() {
             <span className="text-white font-black text-xl">A</span>
           </div>
           <div>
-            <h1 className="text-xl font-black text-indigo-900 tracking-tight leading-none">VOCAB BLAST!</h1>
+            <h1 className="text-xl font-black text-indigo-900 tracking-tight leading-none">VOCABLAST!</h1>
             <p className="text-[9px] text-indigo-400 font-bold uppercase tracking-widest mt-0.5">English Typing Master</p>
           </div>
         </div>
@@ -476,7 +637,7 @@ export default function App() {
               <span className={`text-[9px] px-1.5 py-0.5 rounded font-black ${
                 mode === 'long' ? 'bg-indigo-700/30 text-white' : 'bg-indigo-50 text-indigo-400'
               }`}>
-                8+ chars
+                ≥8 chars
               </span>
             </button>
 
@@ -498,17 +659,27 @@ export default function App() {
               </span>
             </button>
 
-            {/* 自己ベスト表示 */}
-            <div className="mt-auto p-4.5 bg-white rounded-2xl border-2 border-indigo-100 shadow-sm relative overflow-hidden">
-              <div className="absolute -right-4 -bottom-4 opacity-10">
-                <Trophy className="w-14 h-14 text-indigo-900" />
+            {/* 振り返りモードボタン */}
+            <button
+              onClick={() => setGameStatus('review')}
+              className="mt-auto p-4 bg-white hover:bg-indigo-50/50 hover:border-indigo-300 rounded-2xl border-2 border-indigo-100 shadow-sm relative overflow-hidden transition-all duration-200 cursor-pointer text-left w-full group"
+            >
+              <div className="absolute -right-4 -bottom-4 opacity-10 group-hover:scale-110 transition-transform duration-200">
+                <BookOpen className="w-14 h-14 text-indigo-900" />
               </div>
-              <p className="text-[9px] text-indigo-400 font-bold uppercase tracking-widest mb-0.5">Personal Best</p>
-              <p className="text-xl font-black text-indigo-900 flex items-baseline gap-0.5">
-                {personalBest.toLocaleString()}
-                <span className="text-[10px] font-normal text-indigo-400">pts</span>
+              <p className="text-[9px] text-indigo-400 font-bold uppercase tracking-widest mb-0.5">Study Room</p>
+              <p className="text-base font-black text-indigo-900 flex items-center gap-1.5 leading-none">
+                振り返りモード
+                {reviewList.length > 0 && (
+                  <span className="text-[9px] font-bold text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded-full border border-rose-200 animate-pulse">
+                    {reviewList.length}
+                  </span>
+                )}
               </p>
-            </div>
+              <p className="text-[9px] text-indigo-400 mt-1 leading-normal">
+                ミス・ヒントを使用した単語を効率よく復習
+              </p>
+            </button>
           </aside>
         )}
 
@@ -516,10 +687,18 @@ export default function App() {
         <section className="flex-1 flex flex-col items-center justify-center py-4 px-8">
           
           <motion.div 
-            animate={shakeTrigger ? { x: [-10, 10, -10, 10, 0] } : {}}
-            transition={{ duration: 0.3 }}
-            className={`w-full ${gameStatus !== 'title' ? 'max-w-2xl' : 'max-w-xl'} bg-white rounded-[40px] shadow-xl py-5 px-6 border-b-[12px] relative overflow-hidden transition-all duration-300 ${
-              isCorrectFlash ? 'border-indigo-300 bg-emerald-50/10' : 'border-indigo-100'
+            className={`w-full ${
+              gameStatus === 'review' && reviewMode === 'idle'
+                ? 'max-w-4xl'
+                : gameStatus !== 'title'
+                  ? 'max-w-2xl'
+                  : 'max-w-xl'
+            } bg-white rounded-[40px] shadow-xl py-5 px-6 border-b-[12px] relative overflow-hidden transition-all duration-300 ${
+              isCorrectFlash 
+                ? 'border-emerald-300 bg-emerald-50/10' 
+                : isMissFlash
+                  ? 'border-rose-400 bg-rose-50/10 shadow-rose-100'
+                  : 'border-indigo-100'
             }`}
             id="main-card"
           >
@@ -532,7 +711,7 @@ export default function App() {
                 <span className="bg-indigo-100 text-indigo-600 px-4 py-1 rounded-full text-xs font-black tracking-widest uppercase mb-2 inline-block">
                   Are you ready?
                 </span>
-                <h2 className="text-3xl font-black text-indigo-900 mb-1 tracking-tight">VOCAB BLAST!</h2>
+                <h2 className="text-3xl font-black text-indigo-900 mb-1 tracking-tight">VOCABLAST!</h2>
                 <p className="text-xs text-indigo-400 font-medium mb-4 max-w-sm leading-relaxed">
                   画面に表示される日本語をすばやく翻訳し、スペルをタイピングするゲームです。
                 </p>
@@ -570,11 +749,13 @@ export default function App() {
               </div>
             )}
 
-            {/* B. プレイ中ステート */}
-            {gameStatus === 'playing' && currentWord && (
+            {/* B. プレイ中 ＆ 振り返り練習中ステート (共通タイピング画面) */}
+            {((gameStatus === 'playing' && currentWord) || (gameStatus === 'review' && reviewMode !== 'idle' && currentWord)) && (
               <div className="text-center py-2 flex flex-col items-center">
                 <span className="bg-indigo-100 text-indigo-600 px-4 py-1 rounded-full text-[9px] font-black tracking-widest uppercase mb-2 inline-block">
-                  Translate this! ({currentWord.level.toUpperCase()})
+                  {gameStatus === 'review'
+                    ? `Review Room (${reviewMode === 'single' ? '個別復習' : `一括復習 ${reviewQueueIndex + 1}/${reviewQueue.length}`})`
+                    : `Translate this! (${currentWord.level.toUpperCase()})`}
                 </span>
 
                 {/* お題の日本語 */}
@@ -586,31 +767,207 @@ export default function App() {
                 <div className="flex justify-center flex-wrap gap-1.5 mb-6 w-full px-2">
                   {currentWord.english.split('').map((char, index) => {
                     const isTyped = index < typedText.length;
+                    
+                    // 1文字目は常にプレースホルダー（薄いグレー）として表示する (パターンB)
+                    const isFirstLetterReveal = index === 0 && !isTyped;
+                    
+                    // スペースキーでヒント表示対象 (パターン2)
+                    const isHintLetterReveal = index === typedText.length && index === hintIndex;
+
+                    const showPlaceholderChar = isFirstLetterReveal || isHintLetterReveal;
+
                     return (
                       <motion.div
                         key={index}
                         initial={isTyped ? { scale: 1.15 } : { scale: 1 }}
                         animate={{ scale: 1 }}
                         transition={{ duration: 0.15 }}
-                        className={`w-9 h-11 rounded-xl flex items-center justify-center text-xl font-black shadow-sm border ${
+                        className={`w-9 h-11 rounded-xl flex items-center justify-center text-xl font-black shadow-sm border transition-colors duration-150 ${
                           isTyped
                             ? 'bg-indigo-600 border-indigo-700 text-white shadow-indigo-200'
-                            : 'bg-indigo-100 border-indigo-200 text-indigo-300'
+                            : index === typedText.length && isMissFlash
+                              ? 'bg-rose-100 border-rose-400 text-rose-600 shadow-rose-200'
+                              : showPlaceholderChar
+                                ? 'bg-white border-2 border-dashed border-indigo-300 text-indigo-400 shadow-sm'
+                                : 'bg-indigo-100 border-indigo-200 text-indigo-300'
                         }`}
                       >
-                        {isTyped ? char.toUpperCase() : '_'}
+                        {isTyped 
+                          ? char.toUpperCase() 
+                          : showPlaceholderChar 
+                            ? char.toUpperCase() 
+                            : '_'}
                       </motion.div>
                     );
                   })}
                 </div>
 
                 {/* 操作ヒント */}
-                <div className="flex justify-center">
-                  <div className="bg-indigo-50 px-4 py-1.5 rounded-xl text-indigo-400 text-[10px] font-bold flex items-center gap-2">
-                    <span className="bg-white border border-indigo-200 px-1.5 py-0.5 rounded text-indigo-900 shadow-sm font-mono text-[9px]">A-Z</span>
-                    <span>Type the correct spell</span>
+                <div className="flex flex-col items-center gap-3 w-full">
+                  <div className="flex justify-center gap-3">
+                    <div className="bg-indigo-50 px-3 py-1.5 rounded-xl text-indigo-400 text-[10px] font-bold flex items-center gap-2">
+                      <span className="bg-white border border-indigo-200 px-1.5 py-0.5 rounded text-indigo-900 shadow-sm font-mono text-[9px]">A-Z</span>
+                      <span>Type the correct spell</span>
+                    </div>
+                    <div className="bg-indigo-50 px-3 py-1.5 rounded-xl text-indigo-400 text-[10px] font-bold flex items-center gap-2">
+                      <span className="bg-white border border-indigo-200 px-1.5 py-0.5 rounded text-indigo-900 shadow-sm font-mono text-[9px]">Space</span>
+                      <span className="text-indigo-600 font-extrabold animate-pulse">Hint (No Overcome)</span>
+                    </div>
                   </div>
+
+                  {gameStatus === 'review' && (
+                    <button
+                      onClick={stopReview}
+                      className="px-5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 font-extrabold text-xs rounded-xl border border-rose-200 transition-colors cursor-pointer mt-1"
+                    >
+                      練習を中断する (Stop Review)
+                    </button>
+                  )}
                 </div>
+              </div>
+            )}
+
+            {/* D. 振り返り（苦手克服）一覧ステート */}
+            {gameStatus === 'review' && reviewMode === 'idle' && (
+              <div className="py-1 flex flex-col h-[420px] text-left">
+                {/* ヘッダー */}
+                <div className="flex justify-between items-center border-b border-indigo-100 pb-3 mb-3 shrink-0">
+                  <div>
+                    <h2 className="text-2xl font-black text-indigo-900 flex items-center gap-2 tracking-tight">
+                      <BookOpen className="w-6 h-6 text-indigo-600" />
+                      Study Room (苦手克服ルーム)
+                    </h2>
+                    <p className="text-[11px] text-indigo-400 font-medium leading-relaxed mt-0.5">
+                      ミスやヒントを使用した単語が記録されます。ノーミスでクリアすると苦手度が下がり克服されます。
+                    </p>
+                  </div>
+                  
+                  {/* タイトル（戻る）ボタン */}
+                  <button
+                    onClick={() => setGameStatus('title')}
+                    className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-black text-xs rounded-xl border border-indigo-200 transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Home className="w-4 h-4" />
+                    TITLE BACK
+                  </button>
+                </div>
+
+                {reviewList.length === 0 ? (
+                  /* 苦手リストが空の場合 */
+                  <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
+                    <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center text-emerald-500 mb-3 animate-bounce">
+                      <Check className="w-8 h-8" />
+                    </div>
+                    <h3 className="text-lg font-black text-indigo-900 mb-1">苦手な単語はありません！</h3>
+                    <p className="text-xs text-indigo-400 max-w-sm leading-relaxed">
+                      現在、完璧なプレイが維持されています。本番ゲーム中にミスタイプするか、ヒント（スペースキー）を使用すると、自動的にここに記録されます。
+                    </p>
+                  </div>
+                ) : (
+                  /* 苦手リストが存在する場合 */
+                  <div className="flex-1 flex flex-col overflow-hidden">
+                    {/* 上部アクション: 一括練習ボタン */}
+                    <div className="flex justify-between items-center bg-indigo-50/50 p-2.5 rounded-2xl border border-indigo-100 mb-3 shrink-0">
+                      <span className="text-[11px] font-bold text-indigo-700 px-2">
+                        現在登録中: <strong className="text-rose-500 text-sm">{reviewList.length}</strong> 件の苦手単語
+                      </span>
+                      <button
+                        onClick={startAllReview}
+                        className="px-6 py-2.5 bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-black text-xs rounded-xl border-b-2 border-fuchsia-800 shadow-sm flex items-center gap-1.5 transition-all active:translate-y-0.5 active:border-b-0 cursor-pointer"
+                      >
+                        <Sparkles className="w-4 h-4 fill-current" />
+                        一括練習スタート (Shuffle Play)
+                      </button>
+                    </div>
+
+                    {/* 2カラム表示 */}
+                    <div className="flex-1 grid grid-cols-2 gap-4 overflow-hidden">
+                      {/* カラムA: ミスタイプ克服リスト */}
+                      <div className="flex flex-col bg-slate-50/50 rounded-2xl border border-indigo-100/50 p-3 overflow-hidden">
+                        <div className="flex items-center gap-2 mb-2 pb-1.5 border-b border-indigo-100/50 shrink-0">
+                          <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse"></span>
+                          <h4 className="text-xs font-black text-indigo-900 uppercase tracking-wider">
+                            ミスタイプ克服リスト ({reviewList.filter(item => item.missCount > 0).length})
+                          </h4>
+                        </div>
+                        
+                        <div className="flex-1 overflow-y-auto pr-1 flex flex-col gap-1.5 custom-scrollbar">
+                          {reviewList.filter(item => item.missCount > 0).length === 0 ? (
+                            <p className="text-[10px] text-indigo-300 font-bold text-center py-8">ミスタイプによる苦手単語はありません</p>
+                          ) : (
+                            reviewList
+                              .filter(item => item.missCount > 0)
+                              .sort((a, b) => b.missCount - a.missCount)
+                              .map((item) => (
+                                <div key={item.wordId} className="bg-white p-2 rounded-xl border border-indigo-100/50 flex items-center justify-between text-xs hover:border-indigo-200">
+                                  <div className="overflow-hidden pr-2">
+                                    <div className="flex items-baseline gap-1.5">
+                                      <p className="font-black text-indigo-900 truncate tracking-wide text-sm">{item.english}</p>
+                                      <span className="text-[8px] px-1 bg-indigo-50 text-indigo-400 font-bold rounded uppercase shrink-0">{item.level}</span>
+                                    </div>
+                                    <p className="text-[10px] text-indigo-400 font-bold truncate mt-0.5">{item.japanese}</p>
+                                  </div>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className="bg-rose-50 border border-rose-100 text-rose-600 font-black px-1.5 py-0.5 rounded text-[9px]">
+                                      ミス {item.missCount}
+                                    </span>
+                                    <button
+                                      onClick={() => startSingleReview(item.wordId)}
+                                      className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-[9px] rounded-lg transition-colors cursor-pointer"
+                                    >
+                                      練習
+                                    </button>
+                                  </div>
+                                </div>
+                              ))
+                          )}
+                        </div>
+                      </div>
+
+                      {/* カラムB: ヒント使用克服リスト */}
+                      <div className="flex flex-col bg-slate-50/50 rounded-2xl border border-indigo-100/50 p-3 overflow-hidden">
+                        <div className="flex items-center gap-2 mb-2 pb-1.5 border-b border-indigo-100/50 shrink-0">
+                          <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>
+                          <h4 className="text-xs font-black text-indigo-900 uppercase tracking-wider">
+                            ヒント使用克服リスト ({reviewList.filter(item => item.hintCount > 0).length})
+                          </h4>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto pr-1 flex flex-col gap-1.5 custom-scrollbar">
+                          {reviewList.filter(item => item.hintCount > 0).length === 0 ? (
+                            <p className="text-[10px] text-indigo-300 font-bold text-center py-8">ヒント使用による苦手単語はありません</p>
+                          ) : (
+                            reviewList
+                              .filter(item => item.hintCount > 0)
+                              .sort((a, b) => b.hintCount - a.hintCount)
+                              .map((item) => (
+                                <div key={item.wordId} className="bg-white p-2 rounded-xl border border-indigo-100/50 flex items-center justify-between text-xs hover:border-indigo-200">
+                                  <div className="overflow-hidden pr-2">
+                                    <div className="flex items-baseline gap-1.5">
+                                      <p className="font-black text-indigo-900 truncate tracking-wide text-sm">{item.english}</p>
+                                      <span className="text-[8px] px-1 bg-indigo-50 text-indigo-400 font-bold rounded uppercase shrink-0">{item.level}</span>
+                                    </div>
+                                    <p className="text-[10px] text-indigo-400 font-bold truncate mt-0.5">{item.japanese}</p>
+                                  </div>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className="bg-amber-50 border border-amber-100 text-amber-600 font-black px-1.5 py-0.5 rounded text-[9px]">
+                                      ヒント {item.hintCount}
+                                    </span>
+                                    <button
+                                      onClick={() => startSingleReview(item.wordId)}
+                                      className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-[9px] rounded-lg transition-colors cursor-pointer"
+                                    >
+                                      練習
+                                    </button>
+                                  </div>
+                                </div>
+                              ))
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
