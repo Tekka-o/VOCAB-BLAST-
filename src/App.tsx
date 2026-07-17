@@ -118,8 +118,12 @@ export default function App() {
   const [isMissFlash, setIsMissFlash] = useState<boolean>(false);
   const [lastTimeAdded, setLastTimeAdded] = useState<number | null>(null);
 
-  // ランキング (TOP 10 スコアの配列)
-  const [ranking, setRanking] = useState<number[]>([]);
+  // モードごとのランキング (TOP 10 スコアの配列)
+  const [rankings, setRankings] = useState<Record<'little' | 'long' | 'remix', number[]>>({
+    little: [],
+    long: [],
+    remix: []
+  });
   const [newScoreRank, setNewScoreRank] = useState<number>(-1);
 
   // 音声（シンセ）設定：効果音をWeb Audio APIで生成
@@ -127,17 +131,21 @@ export default function App() {
 
   // ローカルストレージからのランキング取得
   useEffect(() => {
-    const savedRanking = localStorage.getItem('vocab_blast_ranking');
-    if (savedRanking) {
-      try {
-        const parsed = JSON.parse(savedRanking) as number[];
-        // 数値の配列であることを確認してソート
-        const sorted = parsed.filter(n => typeof n === 'number').sort((a, b) => b - a).slice(0, 10);
-        setRanking(sorted);
-      } catch (e) {
-        console.error('Error parsing ranking data:', e);
+    const modes: ('little' | 'long' | 'remix')[] = ['little', 'long', 'remix'];
+    const loadedRankings = { little: [], long: [], remix: [] } as Record<'little' | 'long' | 'remix', number[]>;
+
+    modes.forEach(m => {
+      const saved = localStorage.getItem(`vocab_blast_ranking_${m}`);
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved) as number[];
+          loadedRankings[m] = parsed.filter(n => typeof n === 'number').sort((a, b) => b - a).slice(0, 10);
+        } catch (e) {
+          console.error(`Error parsing ranking data for ${m}:`, e);
+        }
       }
-    }
+    });
+    setRankings(loadedRankings);
   }, []);
 
   // Web Audio APIの初期化
@@ -386,9 +394,6 @@ export default function App() {
 
                 // コンボエフェクト起動
                 setComboEffect({ combo: nextCombo, bonus: comboBonus });
-
-                // 本番中にノーミスクリアした場合は、苦手リストから自動削除（完全克服機能）
-                setReviewList(prev => prev.filter(item => item.wordId !== currentWord.id));
               }
 
               // 次の問題へ
@@ -396,21 +401,6 @@ export default function App() {
                 nextQuestion(mode);
               }, 100);
             } else if (gameStatus === 'review') {
-              // 復習（振り返り）中の克服判定
-              if (isReviewWordClean) {
-                // ノーミスかつノーヒントでクリアした場合、カウントをそれぞれ1ずつ減らす（0になったら自動削除）
-                setReviewList(prev => {
-                  return prev.map(item => {
-                    if (item.wordId === currentWord.id) {
-                      const nextMiss = Math.max(0, item.missCount - 1);
-                      const nextHint = Math.max(0, item.hintCount - 1);
-                      return { ...item, missCount: nextMiss, hintCount: nextHint };
-                    }
-                    return item;
-                  }).filter(item => item.missCount > 0 || item.hintCount > 0);
-                });
-              }
-
               // 次の苦手単語練習へ
               setTimeout(() => {
                 const nextIndex = reviewQueueIndex + 1;
@@ -506,7 +496,7 @@ export default function App() {
   // 終了時にスコアをランキングへ保存 (TOP 10 厳選)
   useEffect(() => {
     if (gameStatus === 'result') {
-      const savedRanking = localStorage.getItem('vocab_blast_ranking');
+      const savedRanking = localStorage.getItem(`vocab_blast_ranking_${mode}`);
       let currentRanking: number[] = [];
       if (savedRanking) {
         try {
@@ -522,8 +512,12 @@ export default function App() {
       newRanking.sort((a, b) => b - a);
       // 上位10件のみ切り出し
       const top10 = newRanking.slice(0, 10);
-      localStorage.setItem('vocab_blast_ranking', JSON.stringify(top10));
-      setRanking(top10);
+      localStorage.setItem(`vocab_blast_ranking_${mode}`, JSON.stringify(top10));
+      
+      setRankings(prev => ({
+        ...prev,
+        [mode]: top10
+      }));
 
       // 今回のスコアが何位に入ったかを算出 (1位〜10位)
       const rankIndex = top10.indexOf(score);
@@ -533,10 +527,10 @@ export default function App() {
         setNewScoreRank(-1);
       }
     }
-  }, [gameStatus, score]);
+  }, [gameStatus, score, mode]);
 
   // 自己ベスト（1位のスコア）の取得
-  const personalBest = ranking.length > 0 ? ranking[0] : 0;
+  const personalBest = rankings[mode].length > 0 ? rankings[mode][0] : 0;
 
   return (
     <div className="w-[980px] h-[600px] bg-indigo-50 flex flex-col overflow-hidden font-sans select-none border-4 border-indigo-200 rounded-[32px] shadow-2xl mx-auto my-2 relative">
@@ -811,7 +805,7 @@ export default function App() {
                     </div>
                     <div className="bg-indigo-50 px-3 py-1.5 rounded-xl text-indigo-400 text-[10px] font-bold flex items-center gap-2">
                       <span className="bg-white border border-indigo-200 px-1.5 py-0.5 rounded text-indigo-900 shadow-sm font-mono text-[9px]">Space</span>
-                      <span className="text-indigo-600 font-extrabold animate-pulse">Hint (No Overcome)</span>
+                      <span className="text-indigo-600 font-extrabold animate-pulse">Hint</span>
                     </div>
                   </div>
 
@@ -838,7 +832,7 @@ export default function App() {
                       Study Room (苦手克服ルーム)
                     </h2>
                     <p className="text-[11px] text-indigo-400 font-medium leading-relaxed mt-0.5">
-                      ミスやヒントを使用した単語が記録されます。ノーミスでクリアすると苦手度が下がり克服されます。
+                      ミスやヒントを使用した単語と回数が記録されます。自分のペースで繰り返し練習しましょう。
                     </p>
                   </div>
                   
@@ -1047,14 +1041,20 @@ export default function App() {
         {/* 右サイドバー: ランキング (TOP 10) (タイトル画面のみ表示) */}
         {gameStatus === 'title' && (
           <aside className="w-72 bg-white border-l-4 border-indigo-100 p-6 flex flex-col overflow-hidden shrink-0">
-            <h3 className="text-indigo-900 font-black text-lg mb-4 flex items-center gap-2 border-b border-indigo-50 pb-2">
-              <Trophy className="w-5 h-5 text-amber-400" />
-              PERSONAL TOP 10
-            </h3>
+            <div className="border-b border-indigo-50 pb-2 mb-4">
+              <h3 className="text-indigo-900 font-black text-lg flex items-center gap-2">
+                <Trophy className="w-5 h-5 text-amber-400" />
+                PERSONAL TOP 10
+              </h3>
+              {/* モード別のバッジ表示 */}
+              <div className="mt-1.5 inline-block bg-indigo-50 text-indigo-600 text-[9px] font-black tracking-widest uppercase px-2 py-0.5 rounded-md border border-indigo-100">
+                {mode === 'little' ? 'LITTLE' : mode === 'long' ? 'LONG' : 'REMIX'} RANKING
+              </div>
+            </div>
 
             <div className="flex-1 overflow-y-auto pr-1 flex flex-col gap-2.5 custom-scrollbar">
-              {ranking.length > 0 ? (
-                ranking.map((rankScore, index) => {
+              {rankings[mode].length > 0 ? (
+                rankings[mode].map((rankScore, index) => {
                   const rankNum = index + 1;
                   const isFirst = rankNum === 1;
                   const isNewScoreThisRank = gameStatus === 'result' && score === rankScore && rankNum === newScoreRank;
@@ -1096,7 +1096,8 @@ export default function App() {
                     <Info className="w-5 h-5" />
                   </div>
                   <p className="text-xs font-bold text-indigo-400/90 leading-relaxed">
-                    No Record Yet.<br />Play a game to save score!
+                    No Record for {mode === 'little' ? 'LITTLE' : mode === 'long' ? 'LONG' : 'REMIX'}.<br />
+                    Play a game to record your score!
                   </p>
                 </div>
               )}
